@@ -1,0 +1,442 @@
+# Outpost Mexico Order Intake (Flask)
+
+GitHub-ready repository you can connect to Replit.
+
+---
+
+## `README.md`
+
+### Quick start (Replit via GitHub)
+
+1. **Import** this repo into Replit (Connect GitHub → select repo).
+2. In Replit, add **Secrets** (Environment Variables):
+
+   * `SMTP_HOST` (e.g., `smtp.gmail.com`)
+   * `SMTP_PORT` (e.g., `587`)
+   * `SMTP_USER` (SMTP username / from-address)
+   * `SMTP_PASS` (SMTP password or app password)
+   * `MAIL_TO` = `anca@outpostnow.com`
+3. Click **Run**. The app listens on `$PORT` (default 8080). Share the public URL.
+
+### Local dev (optional)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env  # edit values
+python app.py
+```
+
+App runs at [http://localhost:8080](http://localhost:8080).
+
+### Notes
+
+* RFC format enforced (client + server): `^[A-Za-z]{4}-\d{6}-[A-Za-z0-9]{3}$`.
+* Postal code must be exactly 5 digits.
+* **Fiscal Regime Code** fixed: **616 – Sin Obligaciones Fiscales** (not editable).
+* **UsoCFDI** fixed: **S01 – Sin efectos fiscales** (not editable).
+* Currency dropdown: MXP default, then USD/CAD/EUR/BRL/GBP, then more A–Z.
+* Payment method & Card issuance country support **Other** text fields.
+
+---
+
+## `.replit`
+
+```ini
+run = "python app.py"
+```
+
+---
+
+## `requirements.txt`
+
+```txt
+Flask==3.0.3
+python-dotenv==1.0.1
+gunicorn==22.0.0
+```
+
+> `gunicorn` is optional; Replit will run `python app.py`.
+
+---
+
+## `.env.example`
+
+```env
+# Copy to .env for local dev (Replit uses Secrets instead)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@example.com
+SMTP_PASS=app_password
+MAIL_TO=anca@outpostnow.com
+FLASK_SECRET_KEY=dev-secret
+PORT=8080
+```
+
+---
+
+## `app.py`
+
+```python
+"""
+Flask app that serves a validated intake form and emails the
+submitted data to anca@outpostnow.com via SMTP.
+
+Designed for GitHub → Replit integration.
+"""
+
+from flask import Flask, request, render_template_string, redirect, url_for, flash
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import re
+
+# Load .env if present (local dev). Replit uses Secrets in os.environ
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
+
+RFC_REGEX = re.compile(r"^[A-Za-z]{4}-\d{6}-[A-Za-z0-9]{3}$")
+POSTAL_REGEX = re.compile(r"^\d{5}$")
+
+TOP_CURRENCIES = [
+    ("MXP", "MXP – Mexican Peso (default)"),
+    ("USD", "USD – US Dollar"),
+    ("CAD", "CAD – Canadian Dollar"),
+    ("EUR", "EUR – Euro"),
+    ("BRL", "BRL – Brazilian Real"),
+    ("GBP", "GBP – British Pound"),
+]
+
+OTHER_CURRENCIES = sorted(list(set([
+    "AED","AFN","ALL","AMD","ANG","AOA","ARS","AUD","AWG","AZN",
+    "BAM","BBD","BDT","BGN","BHD","BIF","BND","BOB","BOV","BSD","BTN","BWP",
+    "BYN","BZD","CDF","CHE","CHF","CHW","CLF","CLP","CNY","COP","COU","CRC",
+    "CUC","CUP","CVE","CZK","DJF","DKK","DOP","DZD","EGP","ERN","ETB","FJD",
+    "FKP","GEL","GGP","GHS","GIP","GMD","GNF","GTQ","GYD","HKD","HNL","HRK",
+    "HTG","HUF","IDR","ILS","IMP","INR","IQD","IRR","ISK","JEP","JMD","JOD",
+    "JPY","KES","KGS","KHR","KMF","KPW","KRW","KWD","KYD","KZT","LAK","LBP",
+    "LKR","LRD","LSL","LYD","MAD","MDL","MGA","MKD","MMK","MNT","MOP","MRU",
+    "MUR","MVR","MWK","MYR","MZN","NAD","NGN","NIO","NOK","NPR","NZD","OMR",
+    "PAB","PEN","PGK","PHP","PKR","PLN","PYG","QAR","RON","RSD","RUB","RWF",
+    "SAR","SBD","SCR","SDG","SEK","SGD","SHP","SLE","SLL","SOS","SRD","SSP",
+    "STN","SVC","SYP","SZL","THB","TJS","TMT","TND","TOP","TRY","TTD","TWD",
+    "TZS","UAH","UGX","UYI","UYU","UYW","UZS","VED","VES","VND","VUV","WST",
+    "XAF","XCD","XOF","XPF","YER","ZAR","ZMW","ZWL"
+]) - set([c for c, _ in TOP_CURRENCIES] + ["MXN"])) )
+
+TEMPLATE = """
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Outpost – Mexico Order Intake</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, 'Helvetica Neue', Arial, 'Noto Sans'; background:#0b0d10; color:#eef2f4; margin:0; }
+    .wrap { max-width: 920px; margin: 40px auto; padding: 24px; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+    h2 { font-size: 1.2rem; margin-top: 2rem; border-top: 1px solid #1f2937; padding-top: 1rem; color:#d1d5db; }
+    p.sub { color:#a3a3a3; margin-top:0; }
+    form { display: grid; gap: 16px; }
+    .card { background:#111827; border:1px solid #1f2937; border-radius:16px; padding:20px; box-shadow: 0 10px 24px rgba(0,0,0,0.35); }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    input[type=\"text\"], input[type=\"email\"], input[type=\"date\"], input[type=\"number\"], select, textarea { width:100%; padding:12px 14px; border-radius:12px; border:1px solid #374151; background:#0b1220; color:#e5e7eb; outline:none; }
+    input[type=\"checkbox\"] { transform: scale(1.2); margin-right:10px; }
+    .hint { font-size: 0.85rem; color:#9ca3af; }
+    .error { color:#fca5a5; font-size:0.9rem; }
+    button { background:#2563eb; color:white; font-weight:700; border:none; border-radius:12px; padding:14px 18px; cursor:pointer; }
+    button:disabled { background:#1f2937; cursor:not-allowed; }
+    .muted { color:#9ca3af; font-size:0.9rem; }
+  </style>
+</head>
+<body>
+  <div class=\"wrap\">
+    <h1>Outpost – Mexico Order Intake</h1>
+    <p class=\"sub\">Please complete both sections. Fields marked with * are required.</p>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class=\"card\" role=\"status\" aria-live=\"polite\">
+          {% for m in messages %}<div class=\"error\">{{ m }}</div>{% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <form method=\"post\" action=\"{{ url_for('submit') }}\" id=\"intakeForm\" novalidate>
+      <div class=\"card\">
+        <h2>Section 1: Your details</h2>
+        <div class=\"row\">
+          <div>
+            <label for=\"email\">Customer Email Address *</label>
+            <input type=\"email\" id=\"email\" name=\"email\" required />
+          </div>
+          <div>
+            <label for=\"rfc\">Customer RFC (format: AAAA-######-XXX) *</label>
+            <input type=\"text\" id=\"rfc\" name=\"rfc\" required pattern=\"^[A-Za-z]{4}-\\d{6}-[A-Za-z0-9]{3}$\" placeholder=\"ABCD-001122-3X4\" />
+            <div class=\"hint\">Must match 4 letters - 6 digits - 3 alphanumeric.</div>
+          </div>
+        </div>
+        <div class=\"row\">
+          <div>
+            <label for=\"legal_name\">Customer Legal Name *</label>
+            <input type=\"text\" id=\"legal_name\" name=\"legal_name\" required />
+          </div>
+          <div>
+            <label>Customer Fiscal Regime Code</label>
+            <div class=\"hint\">Fixed: <strong>616 – Sin Obligaciones Fiscales</strong></div>
+            <input type=\"hidden\" id=\"fiscal_regime\" name=\"fiscal_regime\" value=\"616 – Sin Obligaciones Fiscales\" />
+          </div>
+        </div>
+        <div class=\"row\">
+          <div>
+            <label for=\"postal_code\">Customer Fiscal Address – Postal Code (5 digits) *</label>
+            <input type=\"text\" id=\"postal_code\" name=\"postal_code\" required pattern=\"^\\d{5}$\" placeholder=\"12345\" />
+          </div>
+          <div>
+            <label>Use of CFDI Code (UsoCFDI)</label>
+            <div class=\"hint\">Fixed: <strong>S01 – Sin efectos fiscales</strong></div>
+            <input type=\"hidden\" id=\"uso_cfdi\" name=\"uso_cfdi\" value=\"S01 – Sin efectos fiscales\" />
+          </div>
+        </div>
+      </div>
+
+      <div class=\"card\">
+        <h2>Section 2: Your order</h2>
+        <div class=\"row\">
+          <div>
+            <label for=\"order_date\">Date of order *</label>
+            <input type=\"date\" id=\"order_date\" name=\"order_date\" required />
+          </div>
+          <div>
+            <label for=\"amount\">Purchase amount (numbers only) *</label>
+            <input type=\"number\" id=\"amount\" name=\"amount\" required step=\"0.01\" min=\"0\" />
+          </div>
+        </div>
+
+        <div class=\"row\">
+          <div>
+            <label for=\"currency\">Currency *</label>
+            <select id=\"currency\" name=\"currency\" required>
+              <optgroup label=\"Top\">
+                {% for code, label in top_currencies %}
+                  {% if code == 'MXP' %}
+                    <option value=\"{{ code }}\" selected>{{ label }}</option>
+                  {% else %}
+                    <option value=\"{{ code }}\">{{ label }}</option>
+                  {% endif %}
+                {% endfor %}
+              </optgroup>
+              <optgroup label=\"More currencies (A–Z)\">
+                {% for code in other_currencies %}
+                  <option value=\"{{ code }}\">{{ code }}</option>
+                {% endfor %}
+              </optgroup>
+            </select>
+          </div>
+
+          <div>
+            <label for=\"payment_method\">Payment method *</label>
+            <select id=\"payment_method\" name=\"payment_method\" required>
+              <option value=\"\" disabled selected>Select one...</option>
+              <option>Debit card</option>
+              <option>Credit card</option>
+              <option>PayPal</option>
+              <option>Other</option>
+            </select>
+            <input type=\"text\" id=\"payment_other\" name=\"payment_other\" placeholder=\"Please specify\" style=\"margin-top:8px; display:none;\" />
+          </div>
+        </div>
+
+        <div class=\"row\">
+          <div>
+            <label for=\"card_country\">Card issuance country *</label>
+            <select id=\"card_country\" name=\"card_country\" required>
+              <option value=\"Mexico\" selected>Mexico (default)</option>
+              <option>United States</option>
+              <option>Canada</option>
+              <option>Brazil</option>
+              <option>Other</option>
+            </select>
+            <input type=\"text\" id=\"card_country_other\" name=\"card_country_other\" placeholder=\"Please type the country\" style=\"margin-top:8px; display:none;\" />
+          </div>
+        </div>
+      </div>
+
+      <div class=\"card\">
+        <label>
+          <input type=\"checkbox\" id=\"confirm\" required />
+          Please confirm that all the information is correct – incorrect data will result in delays and resubmission.
+        </label>
+        <p class=\"muted\">By submitting, you consent to Outpost processing this information to fulfill your order and tax compliance needs.</p>
+        <button type=\"submit\">Submit</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    const paymentSelect = document.getElementById('payment_method');
+    const paymentOther = document.getElementById('payment_other');
+    const cardCountry = document.getElementById('card_country');
+    const cardCountryOther = document.getElementById('card_country_other');
+
+    function toggleOther(selectEl, otherInput) {
+      if (selectEl.value === 'Other') {
+        otherInput.style.display = 'block';
+        otherInput.setAttribute('required', 'required');
+      } else {
+        otherInput.style.display = 'none';
+        otherInput.removeAttribute('required');
+        otherInput.value = '';
+      }
+    }
+
+    paymentSelect.addEventListener('change', () => toggleOther(paymentSelect, paymentOther));
+    cardCountry.addEventListener('change', () => toggleOther(cardCountry, cardCountryOther));
+
+    const form = document.getElementById('intakeForm');
+    form.addEventListener('submit', function (e) {
+      const rfc = document.getElementById('rfc');
+      const postal = document.getElementById('postal_code');
+      const rfcOk = /^[A-Za-z]{4}-\d{6}-[A-Za-z0-9]{3}$/.test(rfc.value.trim());
+      const pcOk = /^\d{5}$/.test(postal.value.trim());
+
+      if (!rfcOk || !pcOk) {
+        e.preventDefault();
+        alert('Please check: RFC must be AAAA-######-XXX and Postal Code must be 5 digits.');
+        return false;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+SUCCESS_TEMPLATE = """
+<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Submitted – Outpost</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { background:#0b0d10; color:#eef2f4; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, 'Helvetica Neue', Arial; display:flex; align-items:center; justify-content:center; height:100vh; }
+    .box { background:#111827; border:1px solid #1f2937; border-radius:16px; padding:28px; max-width:720px; text-align:center; }
+    a { color:#93c5fd; }
+  </style>
+</head>
+<body>
+  <div class=\"box\">
+    <h2>Thank you! Your form has been submitted.</h2>
+    <p>We've emailed the details to our team at <strong>anca@outpostnow.com</strong>.</p>
+    <p><a href=\"{{ url_for('index') }}\">Submit another response</a></p>
+  </div>
+</body>
+</html>
+"""
+
+@app.get("/")
+def index():
+    return render_template_string(TEMPLATE, top_currencies=TOP_CURRENCIES, other_currencies=OTHER_CURRENCIES)
+
+@app.post("/submit")
+def submit():
+    data = {k: (request.form.get(k) or "").strip() for k in [
+        "email","rfc","legal_name","fiscal_regime","postal_code","uso_cfdi",
+        "order_date","amount","currency","payment_method","payment_other",
+        "card_country","card_country_other"
+    ]}
+
+    # Force fixed values per spec
+    data["fiscal_regime"] = "616 – Sin Obligaciones Fiscales"
+    data["uso_cfdi"] = "S01 – Sin efectos fiscales"
+
+    # Server-side validation
+    errors = []
+    if not data["email"]:
+        errors.append("Email is required.")
+    if not RFC_REGEX.match(data["rfc"]):
+        errors.append("RFC must be in the format AAAA-######-XXX (4 letters, 6 digits, 3 alphanumeric).")
+    if not data["legal_name"]:
+        errors.append("Legal name is required.")
+    if not POSTAL_REGEX.match(data["postal_code"]):
+        errors.append("Postal code must be exactly 5 digits.")
+    if not data["order_date"]:
+        errors.append("Order date is required.")
+    if not data["amount"]:
+        errors.append("Purchase amount is required.")
+    else:
+        try:
+            float(data["amount"])
+        except ValueError:
+            errors.append("Purchase amount must be a number.")
+    if not data["currency"]:
+        errors.append("Currency is required.")
+
+    if data["payment_method"] == "Other" and not data["payment_other"]:
+        errors.append("Please specify the payment method.")
+    if data["card_country"] == "Other" and not data["card_country_other"]:
+        errors.append("Please specify the card issuance country.")
+
+    if errors:
+        for e in errors:
+            flash(e)
+        return redirect(url_for('index'))
+
+    mail_to = os.environ.get("MAIL_TO", "anca@outpostnow.com")
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_pass = os.environ.get("SMTP_PASS")
+
+    subject = "New Mexico Order Intake Form Submission"
+    text_lines = [
+        "SECTION 1 – Your details:",
+        f"Email: {data['email']}",
+        f"RFC: {data['rfc']}",
+        f"Legal Name: {data['legal_name']}",
+        f"Fiscal Regime Code: {data['fiscal_regime']}",
+        f"Postal Code: {data['postal_code']}",
+        f"UsoCFDI: {data['uso_cfdi']}",
+        "",
+        "SECTION 2 – Your order:",
+        f"Order Date: {data['order_date']}",
+        f"Purchase Amount: {data['amount']}",
+        f"Currency: {data['currency']}",
+        f"Payment Method: {data['payment_other'] if data['payment_method']=='Other' else data['payment_method']}",
+        f"Card Issuance Country: {data['card_country_other'] if data['card_country']=='Other' else data['card_country']}"
+    ]
+    body_text = "\n".join(text_lines)
+
+    msg = MIMEMultipart()
+    msg['From'] = smtp_user or 'noreply@outpostnow.com'
+    msg['To'] = mail_to
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body_text, 'plain', 'utf-8'))
+
+    try:
+        if not (smtp_host and smtp_user and smtp_pass):
+            raise RuntimeError("SMTP credentials missing. Set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS.")
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.send_message(msg)
+    except Exception as e:
+        flash(f"Submission saved, but email failed to send: {e}")
+        return render_template_string(SUCCESS_TEMPLATE)
+
+    return render_template_string(SUCCESS_TEMPLATE)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+```
